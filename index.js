@@ -318,6 +318,17 @@ cron.schedule('0 0 * * *', async () => {
     });
 });
 
+bot.command('checkgroup', async (ctx) => {
+    try {
+        // Пытаемся получить информацию о группе
+        const chat = await bot.telegram.getChat(GROUP_ID);
+        ctx.reply(`✅ Бот видит группу: ${chat.title}\nID: ${chat.id}\nТип: ${chat.type}`);
+    } catch (e) {
+        ctx.reply(`❌ Ошибка доступа к группе: ${e.message}`);
+        console.error('Group Check Error:', e);
+    }
+});
+
 // Запуск бота
 // Важно: bot.launch() должен быть после всех определений
 bot.launch().then(() => {
