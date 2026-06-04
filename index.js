@@ -8,7 +8,7 @@ const cron = require('node-cron');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SHOP_ID = process.env.YOOKASSA_SHOP_ID;
 const SECRET_KEY = process.env.YOOKASSA_SECRET_KEY;
-const GROUP_ID = process.env.GROUP_ID;
+const GROUP_ID = process.env.GROUP_ID; // -1004202098685
 const DB_PATH = process.env.DB_PATH || './bot.db';
 const SUBSCRIPTION_PRICE = 100; // Цена в рублях
 const CHECK_INTERVAL_MS = 10000; // Проверка оплат каждые 10 секунд
@@ -18,7 +18,7 @@ const YK_AUTH = Buffer.from(`${SHOP_ID}:${SECRET_KEY}`).toString('base64');
 const YK_HEADERS = {
     'Content-Type': 'application/json',
     'Authorization': `Basic ${YK_AUTH}`,
-    'Idempotence-Key': '' // Будем генерировать уникальный ключ для каждого запроса
+    'Idempotence-Key': '' 
 };
 
 // --- ИНИЦИАЛИЗАЦИЯ БОТА И БД ---
@@ -34,8 +34,7 @@ db.serialize(() => {
         telegram_id INTEGER PRIMARY KEY,
         username TEXT,
         status TEXT DEFAULT 'inactive', -- active, inactive
-        subscription_end DATETIME,
-        last_check DATETIME
+        subscription_end DATETIME
     )`);
 
     db.run(`CREATE TABLE IF NOT EXISTS payments (
@@ -101,7 +100,7 @@ const createYooPayment = async (userId, amount) => {
     
     const payload = {
         amount: { value: amount.toFixed(2), currency: 'RUB' },
-        confirmation: { type: 'redirect', return_url: 'https://t.me/your_bot_name' }, // Можно оставить так
+        confirmation: { type: 'redirect', return_url: `https://t.me/${bot.botInfo.username}` },
         capture: true,
         description: `Подписка для user ${userId}`,
         metadata: { user_id: userId }
@@ -123,38 +122,46 @@ const checkYooPayment = async (paymentId) => {
     const url = `https://api.yookassa.ru/v3/payments/${paymentId}`;
     try {
         const res = await axios.get(url, { headers: YK_HEADERS });
-        return res.data.status; // 'pending', 'succeeded', 'canceled', 'waiting_for_capture'
+        return res.data.status; 
     } catch (e) {
         console.error(`YooCheck Error for ${paymentId}:`, e.message);
         return null;
     }
 };
 
-// 6. Telegram: Добавить пользователя в группу
+// 6. Telegram: Добавить пользователя в группу (ИСПРАВЛЕНО)
 const addUserToGroup = async (userId) => {
     try {
-        // Сначала разбаниваем, если был забанен ранее (иначе addChatMember не сработает)
+        // Сначала разбаниваем, если был забанен ранее
+        // Используем bot.telegram.banChatMember и unbanChatMember - это стандартные методы Telegraf 4+
         await bot.telegram.unbanChatMember(GROUP_ID, userId).catch(() => {}); 
+        
+        // Добавляем пользователя. 
+        // В Telegraf 4+ метод называется addChatMember
         await bot.telegram.addChatMember(GROUP_ID, userId);
         return true;
     } catch (e) {
         console.error(`AddToGroup Error for ${userId}:`, e.message);
+        // Если ошибка "USER_ALREADY_PARTICIPANT", считаем это успехом
+        if (e.description && e.description.includes('USER_ALREADY_PARTICIPANT')) {
+            return true;
+        }
         return false;
     }
 };
 
-// 7. Telegram: Забанить пользователя в группе
+// 7. Telegram: Забанить пользователя в группе (ИСПРАВЛЕНО)
 const banUserInGroup = async (userId) => {
     try {
+        // banChatMember удаляет пользователя из группы
         await bot.telegram.banChatMember(GROUP_ID, userId);
-        // Важно: banChatMember удаляет пользователя. 
-        // Если он захочет зайти позже, его нужно будет сначала unban.
         return true;
     } catch (e) {
         // Игнорируем ошибку, если пользователя уже нет в группе
-        if (!e.message.includes('USER_NOT_PARTICIPANT') && !e.message.includes('user not found')) {
-            console.error(`BanUser Error for ${userId}:`, e.message);
+        if (e.description && (e.description.includes('USER_NOT_PARTICIPANT') || e.description.includes('user not found'))) {
+            return true; 
         }
+        console.error(`BanUser Error for ${userId}:`, e.message);
         return false;
     }
 };
@@ -163,21 +170,51 @@ const banUserInGroup = async (userId) => {
 
 bot.start(async (ctx) => {
     await getOrCreateUser(ctx);
-    ctx.reply(
-        `Привет! 👋\nЭто бот для доступа к закрытой группе.\nСтоимость подписки: ${SUBSCRIPTION_PRICE} руб./мес.`,
-        Markup.inlineKeyboard([
-            Markup.button.url('💳 Оплатить подписку', `https://t.me/${ctx.botInfo.username}?start=pay`)
-        ])
-    );
+    const payload = ctx.startPayload;
+
+    // Если пользователь перешел по ссылке "Оплатить"
+    if (payload === 'pay') {
+        try {
+            const userId = ctx.from.id;
+            // Создаем платеж
+            const payment = await createYooPayment(userId, SUBSCRIPTION_PRICE);
+            
+            // Сохраняем в БД
+            await new Promise((resolve, reject) => {
+                db.run('INSERT OR REPLACE INTO payments (payment_id, telegram_id, amount, status) VALUES (?, ?, ?, ?)',
+                    [payment.id, userId, SUBSCRIPTION_PRICE, 'pending'], (err) => {
+                        if (err) reject(err); else resolve();
+                    });
+            });
+
+            // Отправляем ссылку на оплату
+            ctx.reply(
+                `✅ Платеж на сумму ${SUBSCRIPTION_PRICE} руб. создан.\nНажмите кнопку ниже для перехода в ЮKassa:`,
+                Markup.inlineKeyboard([
+                    Markup.button.url('💳 Оплатить в ЮKassa', payment.confirmation.confirmation_url)
+                ])
+            );
+        } catch (e) {
+            console.error(e);
+            ctx.reply('❌ Не удалось создать платеж. Попробуйте позже или напишите админу.');
+        }
+    } else {
+        // Обычное приветствие
+        ctx.reply(
+            `Привет! 👋\nЯ бот для управления доступом в закрытую группу.\n\nЧтобы получить доступ, необходимо оплатить подписку.`,
+            Markup.inlineKeyboard([
+                Markup.button.url('💳 Получить ссылку на оплату', `https://t.me/${bot.botInfo.username}?start=pay`)
+            ])
+        );
+    }
 });
 
+// Команда /pay
 bot.command('pay', async (ctx) => {
-    const userId = ctx.from.id;
     try {
-        // 1. Создаем платеж в ЮKassa
+        const userId = ctx.from.id;
         const payment = await createYooPayment(userId, SUBSCRIPTION_PRICE);
         
-        // 2. Сохраняем в БД
         await new Promise((resolve, reject) => {
             db.run('INSERT OR REPLACE INTO payments (payment_id, telegram_id, amount, status) VALUES (?, ?, ?, ?)',
                 [payment.id, userId, SUBSCRIPTION_PRICE, 'pending'], (err) => {
@@ -185,15 +222,14 @@ bot.command('pay', async (ctx) => {
                 });
         });
 
-        // 3. Отправляем ссылку
         ctx.reply(
-            `✅ Платеж создан.\nПерейдите по ссылке для оплаты:`,
+            `✅ Платеж создан. Нажмите для оплаты:`,
             Markup.inlineKeyboard([
-                Markup.button.url('Оплатить ' + SUBSCRIPTION_PRICE + ' RUB', payment.confirmation.confirmation_url)
+                Markup.button.url('💳 Оплатить', payment.confirmation.confirmation_url)
             ])
         );
     } catch (e) {
-        ctx.reply('❌ Ошибка создания платежа. Попробуйте позже.');
+        ctx.reply('❌ Ошибка создания платежа.');
     }
 });
 
@@ -235,9 +271,11 @@ setInterval(async () => {
                 
                 // Уведомляем пользователя
                 if (added) {
-                    bot.telegram.sendMessage(payment.telegram_id, '✅ Оплата прошла успешно! Вы добавлены в группу.');
+                    bot.telegram.sendMessage(payment.telegram_id, '✅ Оплата прошла успешно! Вы добавлены в группу.')
+                        .catch(e => console.error('Failed to send success message:', e.message));
                 } else {
-                    bot.telegram.sendMessage(payment.telegram_id, '✅ Оплата прошла, но возникла проблема с добавлением в группу. Напишите админу.');
+                    bot.telegram.sendMessage(payment.telegram_id, '✅ Оплата прошла, но возникла проблема с добавлением в группу. Напишите админу.')
+                        .catch(e => console.error('Failed to send error message:', e.message));
                 }
             } else if (status === 'canceled' || status === 'expired') {
                 await updatePaymentStatus(payment.payment_id, status);
@@ -266,21 +304,18 @@ cron.schedule('0 0 * * *', async () => {
             
             // Уведомляем (если возможно)
             bot.telegram.sendMessage(row.telegram_id, '⚠️ Ваша подписка истекла. Вы были удалены из группы. Для продления используйте /pay.')
-                .catch(() => {}); // Игнорируем ошибку, если юзер заблокировал бота
+                .catch(() => {}); 
         }
     });
 });
 
-bot.command('getid', async (ctx) => {
-    // Если команда написана в группе, ctx.chat.id будет ID группы
-    // Если в личке, то ID пользователя
-    const id = ctx.chat ? ctx.chat.id : ctx.from.id;
-    ctx.reply(`Current Chat ID: ${id}`);
-});
-
 // Запуск бота
-bot.launch();
-console.log('Bot is running...');
+// Важно: bot.launch() должен быть после всех определений
+bot.launch().then(() => {
+    console.log('Bot is running...');
+}).catch(err => {
+    console.error('Failed to launch bot:', err);
+});
 
 // Graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
