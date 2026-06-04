@@ -346,16 +346,23 @@ setInterval(async () => {
                 const inviteLink = await generateInviteLink(payment.telegram_id);
                 
                 if (inviteLink) {
+                    console.log(`Sending link to user ${payment.telegram_id}...`);
                     bot.telegram.sendMessage(payment.telegram_id, 
                         `✅ Оплата прошла успешно!\n\nВаша персональная ссылка для входа в группу (действует 24 часа):\n${inviteLink}`,
                         Markup.inlineKeyboard([
                             Markup.button.url('🚀 Вступить в группу', inviteLink)
                         ])
-                    ).catch(e => console.error('Send Link Error:', e.message));
+                    ).then(() => {
+                        console.log(`Message sent successfully to ${payment.telegram_id}`);
+                    }).catch(e => {
+                        console.error(`❌ Failed to send message to ${payment.telegram_id}:`, e.message);
+                    });
                 } else {
+                    console.error(`❌ No invite link generated for ${payment.telegram_id}. Sending error message.`);
                     bot.telegram.sendMessage(payment.telegram_id, '✅ Оплата прошла, но не удалось создать ссылку. Напишите админу.')
                         .catch(() => {});
                 }
+            
             } else if (status === 'canceled' || status === 'expired') {
                 await updatePaymentStatus(payment.payment_id, status);
             }
