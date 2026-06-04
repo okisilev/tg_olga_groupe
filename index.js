@@ -129,48 +129,62 @@ const checkYooPayment = async (paymentId) => {
     }
 };
 
-// 6. Telegram: Добавить пользователя в группу (ИСПРАВЛЕНО для Telegraf 4.16)
+// Вспомогательная функция для прямых запросов к Telegram API
+const callTelegramAPI = async (method, params) => {
+    const url = `https://api.telegram.org/bot${BOT_TOKEN}/${method}`;
+    try {
+        const res = await axios.post(url, params);
+        return res.data;
+    } catch (e) {
+        console.error(`Telegram API Error (${method}):`, e.response?.data || e.message);
+        throw e;
+    }
+};
+
+// 6. Telegram: Добавить пользователя в группу (через прямой Axios запрос)
 const addUserToGroup = async (userId) => {
     try {
-        // Сначала разбаниваем, если был забанен ранее
-        await bot.telegram.callApi('unbanChatMember', {
+        // 1. Сначала разбаниваем (если был забанен)
+        await callTelegramAPI('unbanChatMember', {
             chat_id: GROUP_ID,
             user_id: userId,
-            only_if_banned: true // Разбанить, только если был забанен
-        }).catch(() => {}); 
-        
-        // Добавляем пользователя через прямой вызов API
-        await bot.telegram.callApi('addChatMember', {
+            only_if_banned: true
+        }).catch(() => {}); // Игнорируем ошибки разбана
+
+        // 2. Добавляем пользователя
+        await callTelegramAPI('addChatMember', {
             chat_id: GROUP_ID,
             user_id: userId
         });
         
         return true;
     } catch (e) {
-        console.error(`AddToGroup Error for ${userId}:`, e.message);
-        // Если ошибка "USER_ALREADY_PARTICIPANT", считаем это успехом
-        if (e.message.includes('USER_ALREADY_PARTICIPANT') || e.message.includes('user is already a member')) {
+        const errorMsg = e.response?.data?.description || e.message;
+        console.error(`AddToGroup Error for ${userId}:`, errorMsg);
+        
+        // Если пользователь уже там, считаем успехом
+        if (errorMsg.includes('USER_ALREADY_PARTICIPANT') || errorMsg.includes('user is already a member')) {
             return true;
         }
         return false;
     }
 };
 
-// 7. Telegram: Забанить пользователя в группе (ИСПРАВЛЕНО для Telegraf 4.16)
+// 7. Telegram: Забанить пользователя в группе (через прямой Axios запрос)
 const banUserInGroup = async (userId) => {
     try {
-        // Баним через прямой вызов API
-        await bot.telegram.callApi('banChatMember', {
+        await callTelegramAPI('banChatMember', {
             chat_id: GROUP_ID,
             user_id: userId
         });
         return true;
     } catch (e) {
-        // Игнорируем ошибку, если пользователя уже нет в группе
-        if (e.message.includes('USER_NOT_PARTICIPANT') || e.message.includes('user not found') || e.message.includes('PARTICIPANT_ID_INVALID')) {
+        const errorMsg = e.response?.data?.description || e.message;
+        // Игнорируем ошибку, если пользователя нет в группе
+        if (errorMsg.includes('USER_NOT_PARTICIPANT') || errorMsg.includes('user not found') || errorMsg.includes('PARTICIPANT_ID_INVALID')) {
             return true; 
         }
-        console.error(`BanUser Error for ${userId}:`, e.message);
+        console.error(`BanUser Error for ${userId}:`, errorMsg);
         return false;
     }
 };
