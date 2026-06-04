@@ -129,36 +129,45 @@ const checkYooPayment = async (paymentId) => {
     }
 };
 
-// 6. Telegram: Добавить пользователя в группу (ИСПРАВЛЕНО)
+// 6. Telegram: Добавить пользователя в группу (ИСПРАВЛЕНО для Telegraf 4.16)
 const addUserToGroup = async (userId) => {
     try {
         // Сначала разбаниваем, если был забанен ранее
-        // Используем bot.telegram.banChatMember и unbanChatMember - это стандартные методы Telegraf 4+
-        await bot.telegram.unbanChatMember(GROUP_ID, userId).catch(() => {}); 
+        await bot.telegram.callApi('unbanChatMember', {
+            chat_id: GROUP_ID,
+            user_id: userId,
+            only_if_banned: true // Разбанить, только если был забанен
+        }).catch(() => {}); 
         
-        // Добавляем пользователя. 
-        // В Telegraf 4+ метод называется addChatMember
-        await bot.telegram.addChatMember(GROUP_ID, userId);
+        // Добавляем пользователя через прямой вызов API
+        await bot.telegram.callApi('addChatMember', {
+            chat_id: GROUP_ID,
+            user_id: userId
+        });
+        
         return true;
     } catch (e) {
         console.error(`AddToGroup Error for ${userId}:`, e.message);
         // Если ошибка "USER_ALREADY_PARTICIPANT", считаем это успехом
-        if (e.description && e.description.includes('USER_ALREADY_PARTICIPANT')) {
+        if (e.message.includes('USER_ALREADY_PARTICIPANT') || e.message.includes('user is already a member')) {
             return true;
         }
         return false;
     }
 };
 
-// 7. Telegram: Забанить пользователя в группе (ИСПРАВЛЕНО)
+// 7. Telegram: Забанить пользователя в группе (ИСПРАВЛЕНО для Telegraf 4.16)
 const banUserInGroup = async (userId) => {
     try {
-        // banChatMember удаляет пользователя из группы
-        await bot.telegram.banChatMember(GROUP_ID, userId);
+        // Баним через прямой вызов API
+        await bot.telegram.callApi('banChatMember', {
+            chat_id: GROUP_ID,
+            user_id: userId
+        });
         return true;
     } catch (e) {
         // Игнорируем ошибку, если пользователя уже нет в группе
-        if (e.description && (e.description.includes('USER_NOT_PARTICIPANT') || e.description.includes('user not found'))) {
+        if (e.message.includes('USER_NOT_PARTICIPANT') || e.message.includes('user not found') || e.message.includes('PARTICIPANT_ID_INVALID')) {
             return true; 
         }
         console.error(`BanUser Error for ${userId}:`, e.message);
