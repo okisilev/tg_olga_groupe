@@ -8,12 +8,12 @@ const cron = require('node-cron');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SHOP_ID = process.env.YOOKASSA_SHOP_ID;
 const SECRET_KEY = process.env.YOOKASSA_SECRET_KEY;
-const GROUP_ID = process.env.GROUP_ID; // -1004202098685
+const GROUP_ID = process.env.GROUP_ID;
 const DB_PATH = process.env.DB_PATH || './bot.db';
 const SUBSCRIPTION_PRICE = 100; // Цена в рублях
 const CHECK_INTERVAL_MS = 10000; // Проверка оплат каждые 10 секунд
 
-// Авторизация для API ЮKassa (Base64)
+// Авторизация для API ЮKassa
 const YK_AUTH = Buffer.from(`${SHOP_ID}:${SECRET_KEY}`).toString('base64');
 const YK_HEADERS = {
     'Content-Type': 'application/json',
@@ -30,6 +30,7 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
 
 // Создание таблиц
 db.serialize(() => {
+    // Таблица пользователей
     db.run(`CREATE TABLE IF NOT EXISTS users (
         telegram_id INTEGER PRIMARY KEY,
         username TEXT,
@@ -37,19 +38,29 @@ db.serialize(() => {
         subscription_end DATETIME
     )`);
 
+    // Таблица платежей
     db.run(`CREATE TABLE IF NOT EXISTS payments (
         payment_id TEXT PRIMARY KEY,
         telegram_id INTEGER,
         amount REAL,
-        status TEXT DEFAULT 'pending', -- pending, succeeded, canceled
+        status TEXT DEFAULT 'pending',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(telegram_id) REFERENCES users(telegram_id)
+    )`);
+
+    // Таблица выданных ссылок (для контроля)
+    db.run(`CREATE TABLE IF NOT EXISTS invite_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id INTEGER,
+        link TEXT UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        used BOOLEAN DEFAULT 0,
         FOREIGN KEY(telegram_id) REFERENCES users(telegram_id)
     )`);
 });
 
 // --- ФУНКЦИИ ПОМОЩНИКИ ---
 
-// 1. Работа с БД: Получить или создать пользователя
 const getOrCreateUser = (ctx) => {
     return new Promise((resolve, reject) => {
         const userId = ctx.from.id;
@@ -68,7 +79,6 @@ const getOrCreateUser = (ctx) => {
     });
 };
 
-// 2. Работа с БД: Обновить статус платежа
 const updatePaymentStatus = (paymentId, status) => {
     return new Promise((resolve, reject) => {
         db.run('UPDATE payments SET status = ? WHERE payment_id = ?', [status, paymentId], (err) => {
@@ -78,7 +88,6 @@ const updatePaymentStatus = (paymentId, status) => {
     });
 };
 
-// 3. Работа с БД: Активировать подписку пользователя
 const activateSubscription = (userId, months = 1) => {
     return new Promise((resolve, reject) => {
         const endDate = new Date();
@@ -93,7 +102,6 @@ const activateSubscription = (userId, months = 1) => {
     });
 };
 
-// 4. ЮKassa: Создать платеж
 const createYooPayment = async (userId, amount) => {
     const idempotenceKey = `${userId}_${Date.now()}`;
     const url = 'https://api.yookassa.ru/v3/payments';
@@ -117,7 +125,6 @@ const createYooPayment = async (userId, amount) => {
     }
 };
 
-// 5. ЮKassa: Проверить статус платежа
 const checkYooPayment = async (paymentId) => {
     const url = `https://api.yookassa.ru/v3/payments/${paymentId}`;
     try {
@@ -129,7 +136,7 @@ const checkYooPayment = async (paymentId) => {
     }
 };
 
-// Вспомогательная функция для прямых запросов к Telegram API
+// Прямой вызов API Telegram
 const callTelegramAPI = async (method, params) => {
     const url = `https://api.telegram.org/bot${BOT_TOKEN}/${method}`;
     try {
@@ -141,50 +148,40 @@ const callTelegramAPI = async (method, params) => {
     }
 };
 
-// 6. Telegram: Создать ссылку-приглашение и отправить пользователю
-const sendInviteLinkToUser = async (userId) => {
+// Генерация ссылки-приглашения (24 часа, 1 использование)
+const generateInviteLink = async (userId) => {
     try {
-        // Генерируем одноразовую ссылку, которая сгорает после использования
+        // Время истечения: текущее время + 24 часа (в секундах)
+        const expireDate = Math.floor(Date.now() / 1000) + (24 * 60 * 60);
+
         const response = await callTelegramAPI('exportChatInviteLink', {
             chat_id: GROUP_ID,
-            creates_join_request: false, // Не создавать запрос на вступление, сразу пускать
-            is_primary: false,           // Не первичная ссылка
-            name: `Invite for user ${userId}`, // Метка для админки
-            expire_date: Math.floor(Date.now() / 1000) + 3600, // Ссылка действует 1 час
-            member_limit: 1              // Только для одного человека
+            expire_date: expireDate,
+            member_limit: 1, // Одноразовая
+            name: `Invite for ${userId}`
         });
 
         if (response.ok && response.result.invite_link) {
-            const inviteLink = response.result.invite_link;
+            const link = response.result.invite_link;
             
-            // Отправляем ссылку пользователю в ЛС
-            await bot.telegram.sendMessage(userId, 
-                `✅ Оплата прошла успешно!\n\nНажмите на ссылку ниже, чтобы вступить в закрытую группу:\n${inviteLink}`,
-                Markup.inlineKeyboard([
-                    Markup.button.url('🚀 Вступить в группу', inviteLink)
-                ])
-            );
-            return true;
-        } else {
-            console.error('Failed to generate invite link:', response);
-            return false;
+            // Сохраняем ссылку в БД
+            await new Promise((resolve, reject) => {
+                db.run('INSERT INTO invite_links (telegram_id, link) VALUES (?, ?)', 
+                    [userId, link], (err) => {
+                        if (err) reject(err); else resolve();
+                    });
+            });
+            
+            return link;
         }
+        return null;
     } catch (e) {
-        console.error(`SendInviteLink Error for ${userId}:`, e.message);
-        // Если не удалось создать ссылку, пробуем просто добавить (на всякий случай)
-        try {
-             await callTelegramAPI('unbanChatMember', { chat_id: GROUP_ID, user_id: userId, only_if_banned: true }).catch(()=>{});
-             await callTelegramAPI('addChatMember', { chat_id: GROUP_ID, user_id: userId });
-             await bot.telegram.sendMessage(userId, '✅ Оплата прошла! Вы добавлены в группу.');
-             return true;
-        } catch (innerE) {
-             await bot.telegram.sendMessage(userId, '✅ Оплата прошла! Но возникла ошибка при добавлении. Пожалуйста, напишите админу @Fun_Oleg.');
-             return false;
-        }
+        console.error('GenerateLink Error:', e.message);
+        return null;
     }
 };
 
-// 7. Telegram: Забанить пользователя (оставляем как было, но через callApi)
+// Бан пользователя в группе
 const banUserInGroup = async (userId) => {
     try {
         await callTelegramAPI('banChatMember', {
@@ -208,14 +205,11 @@ bot.start(async (ctx) => {
     await getOrCreateUser(ctx);
     const payload = ctx.startPayload;
 
-    // Если пользователь перешел по ссылке "Оплатить"
     if (payload === 'pay') {
         try {
             const userId = ctx.from.id;
-            // Создаем платеж
             const payment = await createYooPayment(userId, SUBSCRIPTION_PRICE);
             
-            // Сохраняем в БД
             await new Promise((resolve, reject) => {
                 db.run('INSERT OR REPLACE INTO payments (payment_id, telegram_id, amount, status) VALUES (?, ?, ?, ?)',
                     [payment.id, userId, SUBSCRIPTION_PRICE, 'pending'], (err) => {
@@ -223,7 +217,6 @@ bot.start(async (ctx) => {
                     });
             });
 
-            // Отправляем ссылку на оплату
             ctx.reply(
                 `✅ Платеж на сумму ${SUBSCRIPTION_PRICE} руб. создан.\nНажмите кнопку ниже для перехода в ЮKassa:`,
                 Markup.inlineKeyboard([
@@ -232,10 +225,9 @@ bot.start(async (ctx) => {
             );
         } catch (e) {
             console.error(e);
-            ctx.reply('❌ Не удалось создать платеж. Попробуйте позже или напишите админу.');
+            ctx.reply('❌ Не удалось создать платеж. Попробуйте позже.');
         }
     } else {
-        // Обычное приветствие
         ctx.reply(
             `Привет! 👋\nЯ бот для управления доступом в закрытую группу.\n\nЧтобы получить доступ, необходимо оплатить подписку.`,
             Markup.inlineKeyboard([
@@ -245,7 +237,6 @@ bot.start(async (ctx) => {
     }
 });
 
-// Команда /pay
 bot.command('pay', async (ctx) => {
     try {
         const userId = ctx.from.id;
@@ -282,11 +273,48 @@ bot.command('status', async (ctx) => {
     });
 });
 
+// --- ОБРАБОТКА ВХОДА В ГРУППУ ---
+
+bot.on('new_chat_members', async (ctx) => {
+    const newMembers = ctx.message.new_chat_members;
+    
+    for (const member of newMembers) {
+        if (member.is_bot) continue; // Игнорируем других ботов
+
+        const userId = member.id;
+        console.log(`New member joined: ${userId}`);
+
+        // Проверяем статус пользователя в БД
+        db.get('SELECT * FROM users WHERE telegram_id = ?', [userId], async (err, user) => {
+            if (err) return;
+
+            // Если пользователя нет в БД или он не активен
+            if (!user || user.status !== 'active') {
+                console.log(`User ${userId} has no active subscription. Kicking...`);
+                
+                // Баним пользователя
+                await banUserInGroup(userId);
+                
+                // Отправляем ему в ЛС сообщение (если он писал боту ранее, иначе не дойдет)
+                // Чтобы гарантировать доставку, можно попросить его написать /start
+                bot.telegram.sendMessage(userId, 
+                    `⚠️ У вас нет активной подписки или она истекла.\nВы были автоматически удалены из группы.\n\nДля доступа оплатите подписку:`,
+                    Markup.inlineKeyboard([
+                        Markup.button.url(' Оплатить доступ', `https://t.me/${bot.botInfo.username}?start=pay`)
+                    ])
+                ).catch(() => {}); // Игнорируем ошибку, если юзер заблокировал бота
+            } else {
+                console.log(`User ${userId} has active subscription. Welcome!`);
+                // Можно отправить приветственное сообщение, если нужно
+            }
+        });
+    }
+});
+
 // --- ФОНОВЫЕ ПРОЦЕССЫ ---
 
-// 1. Polling платежей (проверка оплат каждые 10 сек)
+// 1. Polling платежей
 setInterval(async () => {
-    // Ищем все платежи со статусом pending
     db.all('SELECT * FROM payments WHERE status = ?', ['pending'], async (err, rows) => {
         if (err || !rows || rows.length === 0) return;
 
@@ -296,22 +324,22 @@ setInterval(async () => {
             if (status === 'succeeded') {
                 console.log(`Payment ${payment.payment_id} succeeded for user ${payment.telegram_id}`);
                 
-                // Обновляем платеж
                 await updatePaymentStatus(payment.payment_id, 'succeeded');
-                
-                // Активируем пользователя
                 await activateSubscription(payment.telegram_id);
                 
-                // Добавляем в группу
-                const added = await sendInviteLinkToUser(payment.telegram_id);
+                // Генерируем ссылку-приглашение
+                const inviteLink = await generateInviteLink(payment.telegram_id);
                 
-                // Уведомляем пользователя
-                if (added) {
-                    bot.telegram.sendMessage(payment.telegram_id, '✅ Оплата прошла успешно! Вы добавлены в группу.')
-                        .catch(e => console.error('Failed to send success message:', e.message));
+                if (inviteLink) {
+                    bot.telegram.sendMessage(payment.telegram_id, 
+                        `✅ Оплата прошла успешно!\n\nВаша персональная ссылка для входа в группу (действует 24 часа):\n${inviteLink}`,
+                        Markup.inlineKeyboard([
+                            Markup.button.url('🚀 Вступить в группу', inviteLink)
+                        ])
+                    ).catch(e => console.error('Send Link Error:', e.message));
                 } else {
-                    bot.telegram.sendMessage(payment.telegram_id, '✅ Оплата прошла, но возникла проблема с добавлением в группу. Напишите админу.')
-                        .catch(e => console.error('Failed to send error message:', e.message));
+                    bot.telegram.sendMessage(payment.telegram_id, '✅ Оплата прошла, но не удалось создать ссылку. Напишите админу.')
+                        .catch(() => {});
                 }
             } else if (status === 'canceled' || status === 'expired') {
                 await updatePaymentStatus(payment.payment_id, status);
@@ -325,49 +353,27 @@ cron.schedule('0 0 * * *', async () => {
     console.log('Running daily subscription check...');
     const now = new Date().toISOString();
     
-    // Находим активных пользователей, у кого срок истек
     db.all('SELECT telegram_id FROM users WHERE status = ? AND subscription_end < ?', ['active', now], async (err, rows) => {
         if (err || !rows) return;
         
         for (const row of rows) {
             console.log(`Subscription expired for user ${row.telegram_id}. Banning...`);
             
-            // Деактивируем в БД
             db.run('UPDATE users SET status = ? WHERE telegram_id = ?', ['inactive', row.telegram_id]);
-            
-            // Баним в группе
             await banUserInGroup(row.telegram_id);
             
-            // Уведомляем (если возможно)
             bot.telegram.sendMessage(row.telegram_id, '⚠️ Ваша подписка истекла. Вы были удалены из группы. Для продления используйте /pay.')
                 .catch(() => {}); 
         }
     });
 });
 
-bot.command('checkgroup', async (ctx) => {
-    try {
-        // Получаем информацию о чате
-        const chat = await bot.telegram.getChat(GROUP_ID);
-        ctx.reply(`Группа: ${chat.title}\nID: ${chat.id}\nТип: ${chat.type}`);
-        
-        // Проверяем права бота в этой группе
-        const member = await bot.telegram.getChatMember(GROUP_ID, bot.botInfo.id);
-        ctx.reply(`Статус бота: ${member.status}\nПрава: ${JSON.stringify(member.can_restrict_members || {})}`);
-    } catch (e) {
-        ctx.reply(`Ошибка: ${e.message}`);
-        console.error(e);
-    }
-});
-
-// Запуск бота
-// Важно: bot.launch() должен быть после всех определений
+// Запуск
 bot.launch().then(() => {
     console.log('Bot is running...');
 }).catch(err => {
     console.error('Failed to launch bot:', err);
 });
 
-// Graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
