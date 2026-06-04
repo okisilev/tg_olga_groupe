@@ -334,12 +334,16 @@ cron.schedule('0 0 * * *', async () => {
 
 bot.command('checkgroup', async (ctx) => {
     try {
-        // Пытаемся получить информацию о группе
+        // Получаем информацию о чате
         const chat = await bot.telegram.getChat(GROUP_ID);
-        ctx.reply(`✅ Бот видит группу: ${chat.title}\nID: ${chat.id}\nТип: ${chat.type}`);
+        ctx.reply(`Группа: ${chat.title}\nID: ${chat.id}\nТип: ${chat.type}`);
+        
+        // Проверяем права бота в этой группе
+        const member = await bot.telegram.getChatMember(GROUP_ID, bot.botInfo.id);
+        ctx.reply(`Статус бота: ${member.status}\nПрава: ${JSON.stringify(member.can_restrict_members || {})}`);
     } catch (e) {
-        ctx.reply(`❌ Ошибка доступа к группе: ${e.message}`);
-        console.error('Group Check Error:', e);
+        ctx.reply(`Ошибка: ${e.message}`);
+        console.error(e);
     }
 });
 
