@@ -144,28 +144,55 @@ const callTelegramAPI = async (method, params) => {
 // 6. Telegram: Добавить пользователя в группу (через прямой Axios запрос)
 const addUserToGroup = async (userId) => {
     try {
-        // 1. Сначала разбаниваем (если был забанен)
-        await callTelegramAPI('unbanChatMember', {
-            chat_id: GROUP_ID,
-            user_id: userId,
-            only_if_banned: true
-        }).catch(() => {}); // Игнорируем ошибки разбана
+        console.log(`Attempting to add user ${userId} to group ${GROUP_ID}`);
+        
+        // 1. Разбаниваем (на всякий случай)
+        try {
+            await callTelegramAPI('unbanChatMember', {
+                chat_id: GROUP_ID,
+                user_id: userId,
+                only_if_banned: true
+            });
+            console.log(`Unban attempt for ${userId} done.`);
+        } catch (e) {
+            console.log(`Unban error (ignored): ${e.message}`);
+        }
 
-        // 2. Добавляем пользователя
-        await callTelegramAPI('addChatMember', {
+        // 2. Добавляем
+        const result = await callTelegramAPI('addChatMember', {
             chat_id: GROUP_ID,
             user_id: userId
         });
         
+        console.log(`AddChatMember Result:`, JSON.stringify(result));
         return true;
     } catch (e) {
         const errorMsg = e.response?.data?.description || e.message;
-        console.error(`AddToGroup Error for ${userId}:`, errorMsg);
+        const errorCode = e.response?.data?.error_code;
+        
+        console.error(`CRITICAL AddToGroup Error for ${userId}: Code ${errorCode}, Msg: ${errorMsg}`);
         
         // Если пользователь уже там, считаем успехом
-        if (errorMsg.includes('USER_ALREADY_PARTICIPANT') || errorMsg.includes('user is already a member')) {
+        if (errorMsg.includes('USER_ALREADY_PARTICIPANT')) {
             return true;
         }
+        
+        // Если 404, но бот админ, возможно, это баг API с конкретным юзером
+        // Попробуем проверить, есть ли юзер в группе через getChatMember
+        try {
+            const memberInfo = await callTelegramAPI('getChatMember', {
+                chat_id: GROUP_ID,
+                user_id: userId
+            });
+            console.log(`User ${userId} status check:`, memberInfo.status);
+            if (memberInfo.ok && (memberInfo.result.status === 'member' || memberInfo.result.status === 'administrator' || memberInfo.result.status === 'creator')) {
+                console.log(`User is actually in the group despite addChatMember error.`);
+                return true;
+            }
+        } catch (checkErr) {
+            console.error(`Check membership failed: ${checkErr.message}`);
+        }
+
         return false;
     }
 };
