@@ -141,63 +141,50 @@ const callTelegramAPI = async (method, params) => {
     }
 };
 
-// 6. Telegram: Добавить пользователя в группу (через прямой Axios запрос)
-const addUserToGroup = async (userId) => {
+// 6. Telegram: Создать ссылку-приглашение и отправить пользователю
+const sendInviteLinkToUser = async (userId) => {
     try {
-        console.log(`Attempting to add user ${userId} to group ${GROUP_ID}`);
-        
-        // 1. Разбаниваем (на всякий случай)
-        try {
-            await callTelegramAPI('unbanChatMember', {
-                chat_id: GROUP_ID,
-                user_id: userId,
-                only_if_banned: true
-            });
-            console.log(`Unban attempt for ${userId} done.`);
-        } catch (e) {
-            console.log(`Unban error (ignored): ${e.message}`);
-        }
-
-        // 2. Добавляем
-        const result = await callTelegramAPI('addChatMember', {
+        // Генерируем одноразовую ссылку, которая сгорает после использования
+        const response = await callTelegramAPI('exportChatInviteLink', {
             chat_id: GROUP_ID,
-            user_id: userId
+            creates_join_request: false, // Не создавать запрос на вступление, сразу пускать
+            is_primary: false,           // Не первичная ссылка
+            name: `Invite for user ${userId}`, // Метка для админки
+            expire_date: Math.floor(Date.now() / 1000) + 3600, // Ссылка действует 1 час
+            member_limit: 1              // Только для одного человека
         });
-        
-        console.log(`AddChatMember Result:`, JSON.stringify(result));
-        return true;
-    } catch (e) {
-        const errorMsg = e.response?.data?.description || e.message;
-        const errorCode = e.response?.data?.error_code;
-        
-        console.error(`CRITICAL AddToGroup Error for ${userId}: Code ${errorCode}, Msg: ${errorMsg}`);
-        
-        // Если пользователь уже там, считаем успехом
-        if (errorMsg.includes('USER_ALREADY_PARTICIPANT')) {
-            return true;
-        }
-        
-        // Если 404, но бот админ, возможно, это баг API с конкретным юзером
-        // Попробуем проверить, есть ли юзер в группе через getChatMember
-        try {
-            const memberInfo = await callTelegramAPI('getChatMember', {
-                chat_id: GROUP_ID,
-                user_id: userId
-            });
-            console.log(`User ${userId} status check:`, memberInfo.status);
-            if (memberInfo.ok && (memberInfo.result.status === 'member' || memberInfo.result.status === 'administrator' || memberInfo.result.status === 'creator')) {
-                console.log(`User is actually in the group despite addChatMember error.`);
-                return true;
-            }
-        } catch (checkErr) {
-            console.error(`Check membership failed: ${checkErr.message}`);
-        }
 
-        return false;
+        if (response.ok && response.result.invite_link) {
+            const inviteLink = response.result.invite_link;
+            
+            // Отправляем ссылку пользователю в ЛС
+            await bot.telegram.sendMessage(userId, 
+                `✅ Оплата прошла успешно!\n\nНажмите на ссылку ниже, чтобы вступить в закрытую группу:\n${inviteLink}`,
+                Markup.inlineKeyboard([
+                    Markup.button.url('🚀 Вступить в группу', inviteLink)
+                ])
+            );
+            return true;
+        } else {
+            console.error('Failed to generate invite link:', response);
+            return false;
+        }
+    } catch (e) {
+        console.error(`SendInviteLink Error for ${userId}:`, e.message);
+        // Если не удалось создать ссылку, пробуем просто добавить (на всякий случай)
+        try {
+             await callTelegramAPI('unbanChatMember', { chat_id: GROUP_ID, user_id: userId, only_if_banned: true }).catch(()=>{});
+             await callTelegramAPI('addChatMember', { chat_id: GROUP_ID, user_id: userId });
+             await bot.telegram.sendMessage(userId, '✅ Оплата прошла! Вы добавлены в группу.');
+             return true;
+        } catch (innerE) {
+             await bot.telegram.sendMessage(userId, '✅ Оплата прошла! Но возникла ошибка при добавлении. Пожалуйста, напишите админу @Fun_Oleg.');
+             return false;
+        }
     }
 };
 
-// 7. Telegram: Забанить пользователя в группе (через прямой Axios запрос)
+// 7. Telegram: Забанить пользователя (оставляем как было, но через callApi)
 const banUserInGroup = async (userId) => {
     try {
         await callTelegramAPI('banChatMember', {
@@ -207,8 +194,7 @@ const banUserInGroup = async (userId) => {
         return true;
     } catch (e) {
         const errorMsg = e.response?.data?.description || e.message;
-        // Игнорируем ошибку, если пользователя нет в группе
-        if (errorMsg.includes('USER_NOT_PARTICIPANT') || errorMsg.includes('user not found') || errorMsg.includes('PARTICIPANT_ID_INVALID')) {
+        if (errorMsg.includes('USER_NOT_PARTICIPANT') || errorMsg.includes('user not found')) {
             return true; 
         }
         console.error(`BanUser Error for ${userId}:`, errorMsg);
@@ -317,7 +303,7 @@ setInterval(async () => {
                 await activateSubscription(payment.telegram_id);
                 
                 // Добавляем в группу
-                const added = await addUserToGroup(payment.telegram_id);
+                const added = await sendInviteLinkToUser(payment.telegram_id);
                 
                 // Уведомляем пользователя
                 if (added) {
