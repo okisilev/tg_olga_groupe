@@ -154,6 +154,8 @@ const generateInviteLink = async (userId) => {
         // Время истечения: текущее время + 24 часа (в секундах)
         const expireDate = Math.floor(Date.now() / 1000) + (24 * 60 * 60);
 
+        console.log(`Generating invite link for user ${userId}...`);
+
         const response = await callTelegramAPI('exportChatInviteLink', {
             chat_id: GROUP_ID,
             expire_date: expireDate,
@@ -161,22 +163,35 @@ const generateInviteLink = async (userId) => {
             name: `Invite for ${userId}`
         });
 
-        if (response.ok && response.result.invite_link) {
-            const link = response.result.invite_link;
+        // Axios возвращает данные в response.data
+        // Telegram API возвращает { ok: true, result: "ссылка" }
+        if (response && response.ok && response.result) {
+            const link = response.result;
+            console.log(`✅ Invite link generated: ${link}`);
             
             // Сохраняем ссылку в БД
             await new Promise((resolve, reject) => {
                 db.run('INSERT INTO invite_links (telegram_id, link) VALUES (?, ?)', 
                     [userId, link], (err) => {
-                        if (err) reject(err); else resolve();
+                        if (err) {
+                            console.error(`DB Error saving link: ${err.message}`);
+                            reject(err);
+                        } else {
+                            resolve();
+                        }
                     });
             });
             
             return link;
+        } else {
+            console.error(` Failed to generate link. Response:`, JSON.stringify(response));
+            return null;
         }
-        return null;
     } catch (e) {
-        console.error('GenerateLink Error:', e.message);
+        console.error('❌ GenerateLink Critical Error:', e.message);
+        if (e.response) {
+            console.error('API Error Details:', e.response.data);
+        }
         return null;
     }
 };
