@@ -326,6 +326,49 @@ bot.on('new_chat_members', async (ctx) => {
     }
 });
 
+// Временная команда для админа: создать ссылку для конкретного юзера
+bot.command('genlink', async (ctx) => {
+    // Проверка, что это ты (твой ID 431292182)
+    if (ctx.from.id !== 431292182) {
+        return ctx.reply('❌ Эта команда доступна только администратору.');
+    }
+
+    const args = ctx.message.text.split(' ');
+    if (!args[1]) {
+        return ctx.reply('Использование: /genlink USER_ID\nПример: /genlink 5807635774');
+    }
+
+    const userId = parseInt(args[1]);
+    
+    try {
+        const expireDate = Math.floor(Date.now() / 1000) + (24 * 60 * 60);
+        
+        const response = await callTelegramAPI('exportChatInviteLink', {
+            chat_id: GROUP_ID,
+            expire_date: expireDate,
+            member_limit: 1,
+            name: `Admin Test Link for ${userId}`
+        });
+
+        if (response.ok && response.result) {
+            const link = response.result;
+            
+            // Сохраняем в БД, чтобы отслеживать
+            db.run('INSERT INTO invite_links (telegram_id, link) VALUES (?, ?)', [userId, link]);
+            
+            ctx.reply(`✅ Ссылка для пользователя ${userId} создана:\n${link}\n\n(Отправьте эту ссылку пользователю или перейдите сами с его аккаунта)`);
+            
+            // Также отправим ссылку самому пользователю, если он писал боту
+            bot.telegram.sendMessage(userId, `🔗 Тестовая ссылка для входа: ${link}`, Markup.inlineKeyboard([Markup.button.url('Войти', link)])).catch(() => {});
+        } else {
+            ctx.reply('❌ Не удалось создать ссылку.');
+        }
+    } catch (e) {
+        console.error(e);
+        ctx.reply(`❌ Ошибка: ${e.message}`);
+    }
+});
+
 // --- ФОНОВЫЕ ПРОЦЕССЫ ---
 
 // 1. Polling платежей
