@@ -479,6 +479,74 @@ cron.schedule('0 0 * * *', async () => {
     );
 });
 
+// --- КОМАНДА ДЛЯ ТЕСТИРОВАНИЯ CRON (ТОЛЬКО ДЛЯ АДМИНА) ---
+bot.command('testcron', async (ctx) => {
+    // Проверка, что это ты (твой ID)
+    if (ctx.from.id !== ADMIN_ID) {
+        return ctx.reply('❌ Эта команда доступна только администратору.');
+    }
+
+    ctx.reply('⏳ Запуск ручной проверки подписок...');
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+    
+    // Дата через 2 дня для проверки напоминаний
+    const reminderDate = new Date();
+    reminderDate.setDate(reminderDate.getDate() + 2);
+    const reminderDateIso = reminderDate.toISOString();
+
+    // 1. Проверяем истекшие (для бана)
+    db.all('SELECT telegram_id FROM users WHERE status = ? AND subscription_end < ?', ['active', nowIso], async (err, rowsExpired) => {
+        if (!err && rowsExpired && rowsExpired.length > 0) {
+            ctx.reply(`Найдено ${rowsExpired.length} пользователей с истекшей подпиской.`);
+            for (const row of rowsExpired) {
+                console.log(`[TEST] Banning user ${row.telegram_id}`);
+                db.run('UPDATE users SET status = ? WHERE telegram_id = ?', ['inactive', row.telegram_id]);
+                await banUserInGroup(row.telegram_id);
+                try {
+                    await bot.telegram.sendMessage(row.telegram_id, '🧪 [ТЕСТ] Ваша подписка истекла. Вы были удалены из группы.');
+                } catch(e) {}
+            }
+        } else {
+            console.log('[TEST] No expired subscriptions found.');
+        }
+    });
+
+    // 2. Проверяем напоминания (за 2 дня)
+    db.all('SELECT telegram_id, username, subscription_end FROM users WHERE status = ? AND subscription_end >= ? AND subscription_end <= ?', 
+        ['active', nowIso, reminderDateIso], 
+        async (err, rowsReminder) => {
+            
+            if (!err && rowsReminder && rowsReminder.length > 0) {
+                ctx.reply(`Найдено ${rowsReminder.length} пользователей для напоминания.`);
+                
+                for (const row of rowsReminder) {
+                    const endDate = new Date(row.subscription_end);
+                    const daysLeft = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
+                    
+                    console.log(`[TEST] Sending reminder to ${row.telegram_id}. Days left: ${daysLeft}`);
+                    
+                    try {
+                        await bot.telegram.sendMessage(row.telegram_id, 
+                            ` [ТЕСТ] Напоминание о подписке\n\nУважаемый ${row.username || 'пользователь'}, ваша подписка истекает через ${daysLeft} дн.\n\nЧтобы не потерять доступ, продлите подписку:`,
+                            Markup.inlineKeyboard([
+                                Markup.button.url('💳 Продлить подписку', `https://t.me/${bot.botInfo.username}?start=pay`)
+                            ])
+                        );
+                    } catch (e) {
+                        console.error(`Failed to send test reminder to ${row.telegram_id}:`, e.message);
+                    }
+                }
+                ctx.reply('✅ Тестовые напоминания отправлены.');
+            } else {
+                ctx.reply('ℹ️ Нет пользователей, которым нужно отправить напоминание (срок окончания от сегодня до +2 дней).');
+                ctx.reply('💡 Подсказка: Чтобы протестировать, измените дату подписки у пользователя в БД на завтра:\n`UPDATE users SET subscription_end = datetime(\'now\', \'+1 day\') WHERE telegram_id = ВАШ_ID;`');
+            }
+        }
+    );
+});
+
 // Запуск
 bot.launch().then(() => {
     console.log('Bot is running...');
