@@ -146,11 +146,18 @@ const callTelegramAPI = async (method, params) => {
     }
 };
 
-// Генерация ссылки-приглашения (24 часа, 1 использование)
+// Генерация ссылки-приглашения (с принудительным разбаном перед созданием)
 const generateInviteLink = async (userId) => {
     try {
+        // 1. Сначала ГАРАНТИРОВАННО разбаниваем пользователя
+        await unbanUserInGroup(userId);
+        
+        // Небольшая задержка, чтобы Telegram успел обработать разбан (иногда помогает при рассинхроне)
+        await new Promise(resolve => setTimeout(resolve, 500));
+
         const expireDate = Math.floor(Date.now() / 1000) + (24 * 60 * 60); // +24 часа
 
+        console.log(`Generating invite link for user ${userId}...`);
         const response = await callTelegramAPI('exportChatInviteLink', {
             chat_id: GROUP_ID,
             expire_date: expireDate,
@@ -160,6 +167,7 @@ const generateInviteLink = async (userId) => {
 
         if (response && response.ok && response.result) {
             const link = response.result;
+            console.log(`✅ Invite link generated: ${link}`);
             
             // Сохраняем ссылку в БД
             await new Promise((resolve, reject) => {
@@ -171,6 +179,7 @@ const generateInviteLink = async (userId) => {
             
             return link;
         }
+        console.error(` Failed to generate link. Response:`, JSON.stringify(response));
         return null;
     } catch (e) {
         console.error('❌ GenerateLink Critical Error:', e.message);
@@ -196,17 +205,23 @@ const banUserInGroup = async (userId) => {
     }
 };
 
-// Разбан пользователя (для восстановления доступа при оплате)
+// Разбан пользователя (ЯВНЫЙ вызов без only_if_banned для надежности)
 const unbanUserInGroup = async (userId) => {
     try {
-        await callTelegramAPI('unbanChatMember', {
+        console.log(`Attempting to unban user ${userId}...`);
+        // Убираем only_if_banned, чтобы форсировать разбан, если пользователь в черном списке
+        const response = await callTelegramAPI('unbanChatMember', {
             chat_id: GROUP_ID,
-            user_id: userId,
-            only_if_banned: true // Разбанить только если был забанен
+            user_id: userId
         });
+        console.log(`Unban result for ${userId}:`, JSON.stringify(response));
         return true;
     } catch (e) {
-        // Ошибки игнорируем, так как это профилактическая мера
+        console.error(`Unban Error for ${userId}:`, e.message);
+        // Если ошибка "USER_NOT_PARTICIPANT", значит его и так нет в бане/группе - это ок
+        if (e.response?.data?.description?.includes('USER_NOT_PARTICIPANT')) {
+            return true;
+        }
         return false;
     }
 };
@@ -285,7 +300,7 @@ bot.command('status', async (ctx) => {
     });
 });
 
-// Команда для админа: создание тестовой ссылки
+// Команда для админа: создание тестовой ссылки (с принудительным разбаном)
 bot.command('genlink', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) {
         return ctx.reply('❌ Эта команда доступна только администратору.');
@@ -299,8 +314,11 @@ bot.command('genlink', async (ctx) => {
     const userId = parseInt(args[1]);
     
     try {
-        // Сначала разбаним пользователя, если он был забанен, чтобы ссылка сработала
+        ctx.reply(`⏳ Разбаниваю пользователя ${userId} и создаю ссылку...`);
+        
+        // Явный разбан
         await unbanUserInGroup(userId);
+        await new Promise(resolve => setTimeout(resolve, 500)); // Задержка 0.5 сек
 
         const expireDate = Math.floor(Date.now() / 1000) + (24 * 60 * 60);
         
@@ -320,7 +338,7 @@ bot.command('genlink', async (ctx) => {
             
             bot.telegram.sendMessage(userId, `🔗 Тестовая ссылка для входа: ${link}`, Markup.inlineKeyboard([Markup.button.url('Войти', link)])).catch(() => {});
         } else {
-            ctx.reply('❌ Не удалось создать ссылку.');
+            ctx.reply('❌ Не удалось создать ссылку. Проверьте логи.');
         }
     } catch (e) {
         console.error(e);
