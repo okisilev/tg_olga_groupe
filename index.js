@@ -10,7 +10,7 @@ const SHOP_ID = process.env.YOOKASSA_SHOP_ID;
 const SECRET_KEY = process.env.YOOKASSA_SECRET_KEY;
 const GROUP_ID = process.env.GROUP_ID; // -1004202098685
 const DB_PATH = process.env.DB_PATH || './bot.db';
-const SUBSCRIPTION_PRICE = 100; // Цена в рублях
+const SUBSCRIPTION_PRICE = 150; // Цена в рублях
 const CHECK_INTERVAL_MS = 10000; // Проверка оплат каждые 10 секунд
 const ADMIN_ID = 431292182; // Твой ID для команды /genlink
 
@@ -420,24 +420,63 @@ setInterval(async () => {
     });
 }, CHECK_INTERVAL_MS);
 
-// 2. Cron: Проверка истечения подписки (каждый день в 00:00)
+// 2. Cron: Проверка истечения подписки и напоминания (каждый день в 00:00)
 cron.schedule('0 0 * * *', async () => {
-    console.log('Running daily subscription check...');
-    const now = new Date().toISOString();
+    console.log('Running daily subscription check & reminders...');
     
-    db.all('SELECT telegram_id FROM users WHERE status = ? AND subscription_end < ?', ['active', now], async (err, rows) => {
-        if (err || !rows) return;
-        
-        for (const row of rows) {
-            console.log(`Subscription expired for user ${row.telegram_id}. Banning...`);
-            
-            db.run('UPDATE users SET status = ? WHERE telegram_id = ?', ['inactive', row.telegram_id]);
-            await banUserInGroup(row.telegram_id);
-            
-            bot.telegram.sendMessage(row.telegram_id, '⚠️ Ваша подписка истекла. Вы были удалены из группы. Для продления используйте /pay.')
-                .catch(() => {}); 
+    const now = new Date();
+    const nowIso = now.toISOString();
+    
+    // Дата через 2 дня для проверки напоминаний
+    const reminderDate = new Date();
+    reminderDate.setDate(reminderDate.getDate() + 2);
+    const reminderDateIso = reminderDate.toISOString();
+
+    // --- ЧАСТЬ 1: БАНИМ ТЕХ, У КОГО ПОДПИСКА УЖЕ ИСТЕКЛА ---
+    db.all('SELECT telegram_id FROM users WHERE status = ? AND subscription_end < ?', ['active', nowIso], async (err, rowsExpired) => {
+        if (!err && rowsExpired) {
+            for (const row of rowsExpired) {
+                console.log(`Subscription EXPIRED for user ${row.telegram_id}. Banning...`);
+                
+                db.run('UPDATE users SET status = ? WHERE telegram_id = ?', ['inactive', row.telegram_id]);
+                await banUserInGroup(row.telegram_id);
+                
+                bot.telegram.sendMessage(row.telegram_id, '⚠️ Ваша подписка истекла. Вы были удалены из группы. Для продления используйте /pay.')
+                    .catch(() => {}); 
+            }
         }
     });
+
+    // --- ЧАСТЬ 2: НАПОМИНАНИЕ ЗА 2 ДНЯ ДО ОКОНЧАНИЯ ---
+    // Ищем тех, у кого статус active И дата окончания между "сейчас" и "через 2 дня"
+    // Важно: исключаем тех, кому уже отправили напоминание сегодня, чтобы не спамить. 
+    // Для простоты будем слать всем, кто попадает в диапазон.
+    
+    db.all('SELECT telegram_id, username, subscription_end FROM users WHERE status = ? AND subscription_end >= ? AND subscription_end <= ?', 
+        ['active', nowIso, reminderDateIso], 
+        async (err, rowsReminder) => {
+            
+            if (!err && rowsReminder) {
+                for (const row of rowsReminder) {
+                    const endDate = new Date(row.subscription_end);
+                    const daysLeft = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
+                    
+                    console.log(`Sending reminder to user ${row.telegram_id} (${row.username}). Days left: ${daysLeft}`);
+                    
+                    try {
+                        await bot.telegram.sendMessage(row.telegram_id, 
+                            `🔔 Напоминание о подписке\n\nУважаемый ${row.username || 'пользователь'}, ваша подписка истекает через ${daysLeft} дн. (${endDate.toLocaleDateString('ru-RU')}).\n\nЧтобы не потерять доступ к группе, пожалуйста, продлите подписку заранее.`,
+                            Markup.inlineKeyboard([
+                                Markup.button.url('💳 Продлить подписку', `https://t.me/${bot.botInfo.username}?start=pay`)
+                            ])
+                        );
+                    } catch (e) {
+                        console.error(`Failed to send reminder to ${row.telegram_id}:`, e.message);
+                    }
+                }
+            }
+        }
+    );
 });
 
 // Запуск
